@@ -1,7 +1,7 @@
 using System;
 using System.Windows.Forms;
 
-namespace TaskbarPet
+namespace Chubby
 {
     internal static class Program
     {

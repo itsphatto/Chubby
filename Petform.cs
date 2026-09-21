@@ -6,7 +6,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
-namespace TaskbarPet
+namespace Chubby
 {
     public class PetForm : Form
     {
@@ -35,6 +35,7 @@ namespace TaskbarPet
         private readonly System.Windows.Forms.Timer _hoverTimer = new() { Interval = 40 };
         private readonly System.Windows.Forms.Timer _lingerTimer = new() { Interval = 2000 };
         private readonly System.Windows.Forms.Timer _flightTimer = new() { Interval = 2 };
+        private readonly System.Windows.Forms.Timer _directionTimer = new() { Interval = 15000 };
 
         private const int PetSize = 64;
         private const int BubbleAreaHeight = 56;
@@ -88,10 +89,12 @@ namespace TaskbarPet
             _hoverTimer.Tick += (_, _) => CheckHover();
             _lingerTimer.Tick += (_, _) => EndLinger();
             _flightTimer.Tick += (_, _) => UpdateFlight();
+            _directionTimer.Tick += (_, _) => RandomizeDirection();
             _moveTimer.Start();
             _animTimer.Start();
             _topmostTimer.Start();
             _hoverTimer.Start();
+            _directionTimer.Start();
             BuildContextMenu();
         }
 
@@ -118,6 +121,25 @@ namespace TaskbarPet
             catch { _bubbleLoaded = false; }
         }
 
+        /// <summary>
+        /// Deterministic "coin flip" based on the current minute/second, per the formula:
+        /// f(m,s) = ((83m + 47s + 19ms)^2 + 17s) mod 101 < 50 -> 1 (turn left), else 0 (turn right).
+        /// Runs every 15 seconds via _directionTimer. Note: this is clock-driven, not truly
+        /// random - two instances running at the same moment would flip the same way.
+        /// </summary>
+        private void RandomizeDirection()
+        {
+            if (_isDragging || _isFlying) return; // don't fight physics/drag control
+
+            var now = DateTime.Now;
+            long m = now.Minute;
+            long s = now.Second;
+            long inner = 83 * m + 47 * s + 19 * m * s;
+            long result = (inner * inner + 17 * s) % 101;
+
+            _direction = result < 50 ? -1 : 1; // 1 = turn left (-1), 0 = turn right (+1)
+        }
+
         private void CheckHover()
         {
             if (_clickThrough || _isDragging || _isFlying) return;
@@ -130,7 +152,7 @@ namespace TaskbarPet
 
         private void StartHover()
         {
-            _isHoveringLive = true; _lingerTimer.Stop(); _moveTimer.Stop(); _animTimer.Stop();
+            _isHoveringLive = true; _lingerTimer.Stop(); _moveTimer.Stop(); _animTimer.Stop(); _directionTimer.Stop();
             if (!_bubbleShownOnce) { _bubbleVisible = true; _bubbleShownOnce = true; }
             Invalidate();
         }
@@ -139,7 +161,7 @@ namespace TaskbarPet
 
         private void EndLinger()
         {
-            _lingerTimer.Stop(); _bubbleVisible = false; _moveTimer.Start(); _animTimer.Start(); Invalidate();
+            _lingerTimer.Stop(); _bubbleVisible = false; _moveTimer.Start(); _animTimer.Start(); _directionTimer.Start(); Invalidate();
         }
 
         protected override void OnMouseDown(MouseEventArgs e)
@@ -151,7 +173,7 @@ namespace TaskbarPet
             _lastDragScreenPos = PointToScreen(e.Location);
             _lastDragTime = Stopwatch.GetTimestamp();
             _velocityX = _velocityY = 0;
-            _moveTimer.Stop(); _animTimer.Stop(); _hoverTimer.Stop(); _lingerTimer.Stop(); _flightTimer.Stop();
+            _moveTimer.Stop(); _animTimer.Stop(); _hoverTimer.Stop(); _lingerTimer.Stop(); _flightTimer.Stop(); _directionTimer.Stop();
             _isFlying = false; _isHoveringLive = false; _bubbleVisible = false;
             Invalidate();
         }
@@ -224,7 +246,7 @@ namespace TaskbarPet
         private void Land()
         {
             _flightTimer.Stop(); _isFlying = false; _velocityX = _velocityY = 0;
-            _moveTimer.Start(); _animTimer.Start(); _hoverTimer.Start();
+            _moveTimer.Start(); _animTimer.Start(); _hoverTimer.Start(); _directionTimer.Start();
         }
 
         private void PositionAboveTaskbar()
@@ -257,7 +279,9 @@ namespace TaskbarPet
             {
                 _isHoveringLive = false; _lingerTimer.Stop(); _bubbleVisible = false;
                 if (!_moveTimer.Enabled && !_isFlying) _moveTimer.Start();
-                if (!_animTimer.Enabled) _animTimer.Start(); Invalidate();
+                if (!_animTimer.Enabled) _animTimer.Start();
+                if (!_directionTimer.Enabled && !_isFlying) _directionTimer.Start();
+                Invalidate();
             }
         }
 
@@ -276,8 +300,8 @@ namespace TaskbarPet
 
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
-            _moveTimer.Stop(); _animTimer.Stop(); _topmostTimer.Stop(); _hoverTimer.Stop(); _lingerTimer.Stop(); _flightTimer.Stop();
-            _moveTimer.Dispose(); _animTimer.Dispose(); _topmostTimer.Dispose(); _hoverTimer.Dispose(); _lingerTimer.Dispose(); _flightTimer.Dispose();
+            _moveTimer.Stop(); _animTimer.Stop(); _topmostTimer.Stop(); _hoverTimer.Stop(); _lingerTimer.Stop(); _flightTimer.Stop(); _directionTimer.Stop();
+            _moveTimer.Dispose(); _animTimer.Dispose(); _topmostTimer.Dispose(); _hoverTimer.Dispose(); _lingerTimer.Dispose(); _flightTimer.Dispose(); _directionTimer.Dispose();
             _frame1?.Dispose(); _frame2?.Dispose(); _bubble?.Dispose();
             base.OnFormClosed(e);
         }
