@@ -1,6 +1,7 @@
 using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.IO;
 using System.Windows.Forms;
 
 namespace Chubby
@@ -15,6 +16,10 @@ namespace Chubby
         private static readonly Color BorderColor = Color.FromArgb(220, 222, 228);
 
         private PetForm? _pet;
+        private readonly NotifyIcon _trayIcon = new();
+        private ToolStripMenuItem? _trayTogglePetItem;
+        private bool _isExiting;
+        private bool _balloonShown;
 
         private readonly Label _title = new()
         {
@@ -28,7 +33,7 @@ namespace Chubby
 
         private readonly Label _subtitle = new()
         {
-            Text = "your only friend on the taskbar",
+            Text = "Your Working Friend!",
             Dock = DockStyle.Top,
             Height = 24,
             Font = new Font("Segoe UI", 9.5F),
@@ -95,6 +100,103 @@ namespace Chubby
             _removeBtn.Click += (_, _) => RemovePet();
 
             BuildLayout();
+            BuildTrayIcon();
+        }
+
+        private void BuildTrayIcon()
+        {
+            _trayIcon.Text = "Chubby - Desktop Pet";
+            _trayIcon.Icon = LoadTrayIcon();
+            _trayIcon.Visible = true;
+            _trayIcon.DoubleClick += (_, _) => RestoreFromTray();
+
+            var menu = new ContextMenuStrip();
+
+            var openItem = new ToolStripMenuItem("Open Controller", null, (_, _) => RestoreFromTray())
+            {
+                Font = new Font("Segoe UI Semibold", 9F, FontStyle.Bold)
+            };
+            menu.Items.Add(openItem);
+
+            _trayTogglePetItem = new ToolStripMenuItem("Spawn Chubby", null, (_, _) =>
+            {
+                if (_pet == null) SpawnPet();
+                else RemovePet();
+            });
+            menu.Items.Add(_trayTogglePetItem);
+
+            menu.Items.Add(new ToolStripSeparator());
+
+            var exitItem = new ToolStripMenuItem("Exit", null, (_, _) => ExitApplication());
+            menu.Items.Add(exitItem);
+
+            _trayIcon.ContextMenuStrip = menu;
+        }
+
+        private static Icon LoadTrayIcon()
+        {
+            try
+            {
+                var assetsDir = Path.Combine(AppContext.BaseDirectory, "Assets");
+                var idlePath = Path.Combine(assetsDir, "CatIdle1.png");
+                if (File.Exists(idlePath))
+                {
+                    using var stream = new FileStream(idlePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                    using var raw = new Bitmap(stream);
+                    using var square = new Bitmap(32, 32);
+                    using (var g = Graphics.FromImage(square))
+                    {
+                        g.InterpolationMode = InterpolationMode.NearestNeighbor;
+                        g.PixelOffsetMode = PixelOffsetMode.Half;
+                        g.DrawImage(raw, 2, 0, 28, 32);
+                    }
+                    IntPtr hIcon = square.GetHicon();
+                    Icon icon = Icon.FromHandle(hIcon);
+                    return (Icon)icon.Clone();
+                }
+            }
+            catch
+            {
+                // Fallback
+            }
+
+            return SystemIcons.Application;
+        }
+
+        private void MinimizeToTray()
+        {
+            Hide();
+            ShowInTaskbar = false;
+
+            if (!_balloonShown)
+            {
+                _balloonShown = true;
+                _trayIcon.ShowBalloonTip(2000, "Chubby", "Chubby is still running in your system tray!", ToolTipIcon.Info);
+            }
+        }
+
+        private void RestoreFromTray()
+        {
+            Show();
+            ShowInTaskbar = true;
+            WindowState = FormWindowState.Normal;
+            BringToFront();
+            Activate();
+        }
+
+        private void ExitApplication()
+        {
+            _isExiting = true;
+            Close();
+        }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            if (WindowState == FormWindowState.Minimized)
+            {
+                MinimizeToTray();
+            }
         }
 
         private void BuildLayout()
@@ -184,10 +286,24 @@ namespace Chubby
             _spawnBtn.Enabled = !running;
             _spawnBtn.BackColor = running ? Color.FromArgb(230, 232, 236) : AccentColor;
             _removeBtn.Enabled = running;
+
+            if (_trayTogglePetItem != null)
+            {
+                _trayTogglePetItem.Text = running ? "Remove Chubby" : "Spawn Chubby";
+            }
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
+            if (!_isExiting && e.CloseReason == CloseReason.UserClosing)
+            {
+                e.Cancel = true;
+                MinimizeToTray();
+                return;
+            }
+
+            _trayIcon.Visible = false;
+            _trayIcon.Dispose();
             _pet?.Close();
             base.OnFormClosing(e);
         }
