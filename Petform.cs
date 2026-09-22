@@ -638,7 +638,7 @@ namespace Chubby
 
         private void MovePet()
         {
-            // System Inactivity check: sleep if no keyboard/mouse input for 40 seconds (40000ms)
+            // check for unactivity 
             uint idleMs = GetIdleTimeMs();
             if (idleMs >= 40000)
             {
@@ -654,7 +654,6 @@ namespace Chubby
                 WakeUp();
             }
 
-            // Normal active cycle between Walking and Idle
             if (--_stateTicks <= 0)
             {
                 _state = _state switch
