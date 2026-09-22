@@ -19,6 +19,16 @@ namespace Chubby
         [DllImport("user32.dll")]
         private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
 
+        [DllImport("user32.dll")]
+        private static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct LASTINPUTINFO
+        {
+            public uint cbSize;
+            public uint dwTime;
+        }
+
         private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
         private const uint SWP_NOSIZE = 0x0001;
         private const uint SWP_NOMOVE = 0x0002;
@@ -36,12 +46,17 @@ namespace Chubby
         private readonly System.Windows.Forms.Timer _directionTimer = new() { Interval = 15000 };
         private readonly System.Windows.Forms.Timer _fallTimer = new() { Interval = 4 };
         private readonly System.Windows.Forms.Timer _heartTimer = new() { Interval = 30 };
+        private readonly System.Windows.Forms.Timer _dustTimer = new() { Interval = 30 };
+        private readonly System.Windows.Forms.Timer _greetingTimer = new() { Interval = 4000 };
+        private readonly System.Windows.Forms.Timer _sleepAnimTimer = new() { Interval = 600 };
         private readonly Random _random = new();
 
         private const int PetSize = 90;
-        private const int BubbleAreaHeight = 56;
-        private const int WindowHeight = PetSize + BubbleAreaHeight;
+        private const int TopMargin = 56;
+        private const int WindowHeight = PetSize + TopMargin;
         private const float Gravity = 0.6f;
+
+        private static readonly Color TransparentKey = Color.Magenta;
 
         private int _x;
         private int _y;
@@ -50,22 +65,24 @@ namespace Chubby
 
         private enum PetState { Walking, Idle, Sleeping }
 
-        // Behavior cycle: walk, then idle for a bit, then sleep, then walk again.
         private PetState _state = PetState.Walking;
         private int _stateTicks = WalkTicks;
-        private const int WalkTicks = 233;  // 7s at 30ms/tick (_moveTimer)
-        private const int IdleTicks = 333;  // 10s
-        private const int SleepTicks = 1000; // 30s
+        private const int WalkTicks = 233;  // 7s at 30ms/tick
+        private const int IdleTicks = 333;  // 10s at 30ms/tick
+
+        // Idle animation pause configuration
+        private int _idlePauseTicks = 0;
+        private const int IdleAnimationPauseDuration = 20; // Pause ticks between idle runs (~3 seconds delay)
 
         private int _frameIndex;
+        private int _sleepFrameIndex;
         private bool _clickThrough;
         private bool _isHoveringLive;
-        private bool _bubbleVisible;
-        private bool _bubbleShownOnce;
         private bool _isDragging;
         private Point _dragCursorOffset;
         private float _fallY;
         private float _velocityY;
+        private string? _greetingText;
 
         private sealed class HeartParticle
         {
@@ -81,24 +98,35 @@ namespace Chubby
             public Color HighlightColor;
         }
 
+        private sealed class DustParticle
+        {
+            public float X;
+            public float Y;
+            public float VelocityX;
+            public int Life;
+            public int MaxLife;
+            public int Size;
+        }
+
         private readonly List<HeartParticle> _hearts = [];
         private readonly object _heartLock = new();
+        private readonly List<DustParticle> _dustParticles = [];
+        private readonly object _dustLock = new();
         private int _petDistance;
         private Point _lastHoverPos;
         private DateTime _lastPetTime = DateTime.MinValue;
 
         private const int IdleFrameCount = 11;
         private const int WalkFrameCount = 6;
+        private const int SleepFrameCount = 2;
         private readonly Image?[] _idleFrames = new Image?[IdleFrameCount];
         private readonly Image?[] _walkLeftFrames = new Image?[WalkFrameCount];
         private readonly Image?[] _walkRightFrames = new Image?[WalkFrameCount];
-        private Image? _sleepLeft;
-        private Image? _sleepRight;
+        private readonly Image?[] _sleepLeftFrames = new Image?[SleepFrameCount];
+        private readonly Image?[] _sleepRightFrames = new Image?[SleepFrameCount];
         private bool _idleLoaded;
         private bool _walkLoaded;
         private bool _sleepLoaded;
-        private Image? _bubble;
-        private bool _bubbleLoaded;
 
         public PetForm()
         {
@@ -107,17 +135,39 @@ namespace Chubby
             TopMost = true;
             StartPosition = FormStartPosition.Manual;
             Size = new Size(PetSize, WindowHeight);
-            BackColor = Color.Magenta;
-            TransparencyKey = Color.Magenta;
+            BackColor = TransparentKey;
+            TransparencyKey = TransparentKey;
             DoubleBuffered = true;
 
             PositionAboveTaskbar();
             LoadSprites();
 
             _moveTimer.Tick += (_, _) => MovePet();
+            
+            // Frame animation ticker with idle pause delay logic
             _animTimer.Tick += (_, _) =>
             {
-                _frameIndex++;
+                if (_state == PetState.Idle)
+                {
+                    if (_idlePauseTicks > 0)
+                    {
+                        _idlePauseTicks--;
+                        Invalidate();
+                        return;
+                    }
+
+                    _frameIndex++;
+                    if (_frameIndex >= IdleFrameCount)
+                    {
+                        _frameIndex = 0;
+                        _idlePauseTicks = IdleAnimationPauseDuration; // Pause before playing next set
+                    }
+                }
+                else
+                {
+                    _frameIndex++;
+                }
+
                 Invalidate();
             };
 
@@ -127,6 +177,18 @@ namespace Chubby
             _directionTimer.Tick += (_, _) => RandomizeDirection();
             _fallTimer.Tick += (_, _) => UpdateFall();
             _heartTimer.Tick += (_, _) => UpdateHearts();
+            _dustTimer.Tick += (_, _) => UpdateDust();
+            _greetingTimer.Tick += (_, _) =>
+            {
+                _greetingText = null;
+                _greetingTimer.Stop();
+                Invalidate();
+            };
+            _sleepAnimTimer.Tick += (_, _) =>
+            {
+                _sleepFrameIndex++;
+                Invalidate();
+            };
 
             _moveTimer.Start();
             _animTimer.Start();
@@ -135,6 +197,20 @@ namespace Chubby
             _directionTimer.Start();
 
             BuildContextMenu();
+            ShowClockGreeting();
+        }
+
+        private static uint GetIdleTimeMs()
+        {
+            var lastInputInfo = new LASTINPUTINFO();
+            lastInputInfo.cbSize = (uint)Marshal.SizeOf(lastInputInfo);
+            if (!GetLastInputInfo(ref lastInputInfo))
+                return 0;
+
+            uint envTicks = (uint)Environment.TickCount;
+            return envTicks >= lastInputInfo.dwTime
+                ? envTicks - lastInputInfo.dwTime
+                : (uint.MaxValue - lastInputInfo.dwTime) + envTicks;
         }
 
         private void LoadSprites()
@@ -145,40 +221,10 @@ namespace Chubby
             _walkLoaded = TryLoadSequence(assetsDir, "CatWalkingLeft", WalkFrameCount, _walkLeftFrames)
                         & TryLoadSequence(assetsDir, "CatWalkingRight", WalkFrameCount, _walkRightFrames);
 
-            try
-            {
-                var left = Path.Combine(assetsDir, "CatSleepingLeft.png");
-                var right = Path.Combine(assetsDir, "CatSleepingRight.png");
-
-                if (File.Exists(left) && File.Exists(right))
-                {
-                    _sleepLeft = LoadCleanBitmap(left);
-                    _sleepRight = LoadCleanBitmap(right);
-                    _sleepLoaded = true;
-                }
-            }
-            catch
-            {
-                _sleepLoaded = false;
-            }
-
-            try
-            {
-                var bubblePath = Path.Combine(assetsDir, "HiChatBubble.png");
-
-                if (File.Exists(bubblePath))
-                {
-                    _bubble = LoadCleanBitmap(bubblePath);
-                    _bubbleLoaded = true;
-                }
-            }
-            catch
-            {
-                _bubbleLoaded = false;
-            }
+            _sleepLoaded = TryLoadSequence(assetsDir, "CatSleepingLeft", SleepFrameCount, _sleepLeftFrames)
+                         & TryLoadSequence(assetsDir, "CatSleepingRight", SleepFrameCount, _sleepRightFrames);
         }
 
-        // Loads "<prefix>1.png" .. "<prefix>{count}.png" into dest. Returns true only if every frame loaded.
         private static bool TryLoadSequence(string assetsDir, string prefix, int count, Image?[] dest)
         {
             try
@@ -223,7 +269,6 @@ namespace Chubby
         private void RandomizeDirection()
         {
             if (_isDragging) return;
-
             _direction = _random.Next(0, 2) == 0 ? -1 : 1;
         }
 
@@ -276,11 +321,21 @@ namespace Chubby
                 StopHover();
         }
 
+        private void GoToSleep()
+        {
+            _state = PetState.Sleeping;
+            _sleepFrameIndex = 0;
+            _sleepAnimTimer.Start();
+            Invalidate();
+        }
+
         private void WakeUp()
         {
             _state = PetState.Idle;
             _stateTicks = IdleTicks;
             _frameIndex = 0;
+            _idlePauseTicks = 0;
+            _sleepAnimTimer.Stop();
             if (!_animTimer.Enabled) _animTimer.Start();
             if (!_moveTimer.Enabled) _moveTimer.Start();
             if (!_directionTimer.Enabled) _directionTimer.Start();
@@ -337,7 +392,6 @@ namespace Chubby
                 _heartTimer.Start();
             }
 
-            _bubbleVisible = false;
             Invalidate();
         }
 
@@ -368,6 +422,69 @@ namespace Chubby
             Invalidate();
         }
 
+        private void SpawnDust(int count)
+        {
+            int spriteY = WindowHeight - PetSize;
+            float baseX = PetSize / 2f;
+            float baseY = spriteY + PetSize - 4;
+
+            lock (_dustLock)
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    _dustParticles.Add(new DustParticle
+                    {
+                        X = baseX + _random.Next(-14, 15),
+                        Y = baseY,
+                        VelocityX = (float)(_random.NextDouble() * 1.6 - 0.8),
+                        Life = 0,
+                        MaxLife = _random.Next(14, 22),
+                        Size = _random.Next(3, 6)
+                    });
+                }
+            }
+
+            if (!_dustTimer.Enabled) _dustTimer.Start();
+            Invalidate();
+        }
+
+        private void UpdateDust()
+        {
+            lock (_dustLock)
+            {
+                for (int i = _dustParticles.Count - 1; i >= 0; i--)
+                {
+                    var d = _dustParticles[i];
+                    d.X += d.VelocityX;
+                    d.Y -= 0.3f;
+                    d.Life++;
+
+                    if (d.Life >= d.MaxLife)
+                        _dustParticles.RemoveAt(i);
+                }
+
+                if (_dustParticles.Count == 0) _dustTimer.Stop();
+            }
+
+            Invalidate();
+        }
+
+        private void ShowClockGreeting()
+        {
+            int hour = DateTime.Now.Hour;
+            _greetingText = hour switch
+            {
+                >= 5 and < 12 => "Good morning!",
+                >= 12 and < 17 => "Good afternoon!",
+                >= 17 and < 22 => "Good evening!",
+                _ => "It's late, go to sleep!"
+            };
+
+            _greetingTimer.Stop();
+            _greetingTimer.Start();
+            Invalidate();
+        }
+
         private void StartHover()
         {
             _isHoveringLive = true;
@@ -375,12 +492,6 @@ namespace Chubby
             _moveTimer.Stop();
             _animTimer.Stop();
             _directionTimer.Stop();
-
-            if (!_bubbleShownOnce)
-            {
-                _bubbleVisible = true;
-                _bubbleShownOnce = true;
-            }
 
             Invalidate();
         }
@@ -394,8 +505,8 @@ namespace Chubby
         private void EndLinger()
         {
             _lingerTimer.Stop();
-            _bubbleVisible = false;
             _frameIndex = 0;
+            _idlePauseTicks = 0;
             _moveTimer.Start();
             _animTimer.Start();
             _directionTimer.Start();
@@ -426,7 +537,6 @@ namespace Chubby
             _fallTimer.Stop();
 
             _isHoveringLive = false;
-            _bubbleVisible = false;
 
             Invalidate();
         }
@@ -510,6 +620,8 @@ namespace Chubby
             _y = workArea.Bottom - WindowHeight;
             Location = new Point(_x, _y);
 
+            SpawnDust(5);
+
             _moveTimer.Start();
             _animTimer.Start();
             _hoverTimer.Start();
@@ -526,15 +638,41 @@ namespace Chubby
 
         private void MovePet()
         {
+            // System Inactivity check: sleep if no keyboard/mouse input for 40 seconds (40000ms)
+            uint idleMs = GetIdleTimeMs();
+            if (idleMs >= 40000)
+            {
+                if (_state != PetState.Sleeping)
+                {
+                    GoToSleep();
+                }
+                Invalidate();
+                return;
+            }
+            else if (_state == PetState.Sleeping)
+            {
+                WakeUp();
+            }
+
+            // Normal active cycle between Walking and Idle
             if (--_stateTicks <= 0)
             {
-                (_state, _stateTicks) = _state switch
+                _state = _state switch
                 {
-                    PetState.Walking => (PetState.Idle, IdleTicks),
-                    PetState.Idle => (PetState.Sleeping, SleepTicks),
-                    _ => (PetState.Walking, WalkTicks)
+                    PetState.Walking => PetState.Idle,
+                    _ => PetState.Walking
                 };
+
+                _stateTicks = _state switch
+                {
+                    PetState.Walking => WalkTicks,
+                    _ => IdleTicks
+                };
+
                 _frameIndex = 0;
+                _idlePauseTicks = 0;
+
+                if (_state == PetState.Walking) SpawnDust(3);
             }
 
             if (_state != PetState.Walking)
@@ -560,6 +698,7 @@ namespace Chubby
             _y = workArea.Bottom - WindowHeight;
             Location = new Point(_x, _y);
         }
+
         private void ForceTopmost()
         {
             SetWindowPos(
@@ -587,7 +726,6 @@ namespace Chubby
             {
                 _isHoveringLive = false;
                 _lingerTimer.Stop();
-                _bubbleVisible = false;
 
                 if (!_moveTimer.Enabled) _moveTimer.Start();
                 if (!_animTimer.Enabled) _animTimer.Start();
@@ -631,6 +769,9 @@ namespace Chubby
             _directionTimer.Stop();
             _fallTimer.Stop();
             _heartTimer.Stop();
+            _dustTimer.Stop();
+            _greetingTimer.Stop();
+            _sleepAnimTimer.Stop();
 
             _moveTimer.Dispose();
             _animTimer.Dispose();
@@ -640,13 +781,15 @@ namespace Chubby
             _directionTimer.Dispose();
             _fallTimer.Dispose();
             _heartTimer.Dispose();
+            _dustTimer.Dispose();
+            _greetingTimer.Dispose();
+            _sleepAnimTimer.Dispose();
 
             foreach (var f in _idleFrames) f?.Dispose();
             foreach (var f in _walkLeftFrames) f?.Dispose();
             foreach (var f in _walkRightFrames) f?.Dispose();
-            _sleepLeft?.Dispose();
-            _sleepRight?.Dispose();
-            _bubble?.Dispose();
+            foreach (var f in _sleepLeftFrames) f?.Dispose();
+            foreach (var f in _sleepRightFrames) f?.Dispose();
 
             base.OnFormClosed(e);
         }
@@ -665,7 +808,9 @@ namespace Chubby
                 PetState.Walking when _walkLoaded => facingLeft
                     ? _walkLeftFrames[_frameIndex % WalkFrameCount]
                     : _walkRightFrames[_frameIndex % WalkFrameCount],
-                PetState.Sleeping when _sleepLoaded => facingLeft ? _sleepLeft : _sleepRight,
+                PetState.Sleeping when _sleepLoaded => facingLeft
+                    ? _sleepLeftFrames[_sleepFrameIndex % SleepFrameCount]
+                    : _sleepRightFrames[_sleepFrameIndex % SleepFrameCount],
                 PetState.Idle when _idleLoaded => _idleFrames[_frameIndex % IdleFrameCount],
                 _ => null
             };
@@ -675,8 +820,6 @@ namespace Chubby
                 g.InterpolationMode = InterpolationMode.NearestNeighbor;
                 g.PixelOffsetMode = PixelOffsetMode.Half;
 
-                // Idle art is drawn facing right; flip it for left-facing idle.
-                // Walk/sleep sets already have dedicated left/right art, so no flip needed.
                 bool usesIdleOrientation = _state == PetState.Idle || isFrozenWalking;
                 if (usesIdleOrientation && facingLeft)
                 {
@@ -693,7 +836,7 @@ namespace Chubby
             }
             else
             {
-                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.SmoothingMode = SmoothingMode.None;
                 int legOffset = _state == PetState.Walking && _frameIndex % 2 == 0 ? 4 : -4;
 
                 using var bodyBrush = new SolidBrush(Color.FromArgb(255, 120, 170, 240));
@@ -718,23 +861,6 @@ namespace Chubby
                 g.FillEllipse(eyeBrush, eyeX, spriteY + 16, 6, 6);
             }
 
-            if (_bubbleVisible && _bubbleLoaded && _bubble != null)
-            {
-                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-
-                float scale = Math.Min(
-                    (float)PetSize / _bubble.Width,
-                    (float)BubbleAreaHeight / _bubble.Height
-                );
-
-                int drawW = (int)(_bubble.Width * scale);
-                int drawH = (int)(_bubble.Height * scale);
-                int drawX = (PetSize - drawW) / 2;
-                int drawY = spriteY - drawH;
-
-                g.DrawImage(_bubble, drawX, drawY, drawW, drawH);
-            }
-
             lock (_heartLock)
             {
                 if (_hearts.Count > 0)
@@ -744,6 +870,31 @@ namespace Chubby
                         DrawPixelHeart(g, heart);
                     }
                 }
+            }
+
+            if (_greetingText != null)
+            {
+                using var font = new Font("Segoe UI", 7.5F, FontStyle.Bold);
+                float bw = PetSize - 4f;
+                float bh = TopMargin - 6f;
+                float br = 8f;
+
+                using var bubblePath = new GraphicsPath();
+                bubblePath.AddArc(2, 2, br, br, 180, 90);
+                bubblePath.AddArc(2 + bw - br, 2, br, br, 270, 90);
+                bubblePath.AddArc(2 + bw - br, 2 + bh - br, br, br, 0, 90);
+                bubblePath.AddArc(2, 2 + bh - br, br, br, 90, 90);
+                bubblePath.CloseFigure();
+
+                using var bubbleBrush = new SolidBrush(Color.FromArgb(255, 255, 250, 235));
+                using var bubbleBorder = new Pen(Color.FromArgb(255, 210, 195, 160), 1);
+                g.SmoothingMode = SmoothingMode.None;
+                g.FillPath(bubbleBrush, bubblePath);
+                g.DrawPath(bubbleBorder, bubblePath);
+
+                using var textBrush = new SolidBrush(Color.FromArgb(255, 60, 50, 40));
+                using var format = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+                g.DrawString(_greetingText, font, textBrush, new RectangleF(3, 3, bw - 2, bh - 4), format);
             }
         }
 
@@ -756,26 +907,14 @@ namespace Chubby
             using var mainBrush = new SolidBrush(heart.PrimaryColor);
             using var highBrush = new SolidBrush(heart.HighlightColor);
 
-            // Row 0: . ## . ## .
             g.FillRectangle(mainBrush, hx + 1 * s, hy + 0 * s, 2 * s, s);
             g.FillRectangle(mainBrush, hx + 4 * s, hy + 0 * s, 2 * s, s);
-
-            // Row 1: #######
             g.FillRectangle(mainBrush, hx + 0 * s, hy + 1 * s, 7 * s, s);
-
-            // Row 2: #######
             g.FillRectangle(mainBrush, hx + 0 * s, hy + 2 * s, 7 * s, s);
-
-            // Row 3: . ##### .
             g.FillRectangle(mainBrush, hx + 1 * s, hy + 3 * s, 5 * s, s);
-
-            // Row 4: .. ### ..
             g.FillRectangle(mainBrush, hx + 2 * s, hy + 4 * s, 3 * s, s);
-
-            // Row 5: ... # ...
             g.FillRectangle(mainBrush, hx + 3 * s, hy + 5 * s, 1 * s, s);
 
-            // Cute pixel sparkle / highlight on upper left
             g.FillRectangle(highBrush, hx + 1 * s, hy + 1 * s, s, s);
         }
     }
