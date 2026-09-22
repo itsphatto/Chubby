@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
@@ -49,6 +50,7 @@ namespace Chubby
         private readonly System.Windows.Forms.Timer _dustTimer = new() { Interval = 30 };
         private readonly System.Windows.Forms.Timer _greetingTimer = new() { Interval = 4000 };
         private readonly System.Windows.Forms.Timer _sleepAnimTimer = new() { Interval = 600 };
+        private readonly System.Windows.Forms.Timer _tailWagAnimTimer = new() { Interval = 100 };
         private readonly Random _random = new();
 
         private const int PetSize = 90;
@@ -63,7 +65,7 @@ namespace Chubby
         private int _direction = 1;
         private int _speed = 2;
 
-        private enum PetState { Walking, Idle, Sleeping }
+        private enum PetState { Walking, Running, Idle, Sleeping }
 
         private PetState _state = PetState.Walking;
         private int _stateTicks = WalkTicks;
@@ -76,6 +78,7 @@ namespace Chubby
 
         private int _frameIndex;
         private int _sleepFrameIndex;
+        private int _tailWagFrameIndex;
         private bool _clickThrough;
         private bool _isHoveringLive;
         private bool _isDragging;
@@ -119,14 +122,23 @@ namespace Chubby
         private const int IdleFrameCount = 11;
         private const int WalkFrameCount = 6;
         private const int SleepFrameCount = 2;
+        private const int TailWagFrameCount = 5;
+        private const int RunFrameCount = 5;
+
         private readonly Image?[] _idleFrames = new Image?[IdleFrameCount];
         private readonly Image?[] _walkLeftFrames = new Image?[WalkFrameCount];
         private readonly Image?[] _walkRightFrames = new Image?[WalkFrameCount];
         private readonly Image?[] _sleepLeftFrames = new Image?[SleepFrameCount];
         private readonly Image?[] _sleepRightFrames = new Image?[SleepFrameCount];
+        private readonly Image?[] _tailWagFrames = new Image?[TailWagFrameCount];
+        private readonly Image?[] _runLeftFrames = new Image?[RunFrameCount];
+        private readonly Image?[] _runRightFrames = new Image?[RunFrameCount];
+
         private bool _idleLoaded;
         private bool _walkLoaded;
         private bool _sleepLoaded;
+        private bool _tailWagLoaded;
+        private bool _runLoaded;
 
         public PetForm()
         {
@@ -189,6 +201,14 @@ namespace Chubby
                 _sleepFrameIndex++;
                 Invalidate();
             };
+            _tailWagAnimTimer.Tick += (_, _) =>
+            {
+                if (_isHoveringLive)
+                {
+                    _tailWagFrameIndex++;
+                    Invalidate();
+                }
+            };
 
             _moveTimer.Start();
             _animTimer.Start();
@@ -218,11 +238,17 @@ namespace Chubby
             var assetsDir = Path.Combine(AppContext.BaseDirectory, "Assets");
 
             _idleLoaded = TryLoadSequence(assetsDir, "CatIdle", IdleFrameCount, _idleFrames);
+            
             _walkLoaded = TryLoadSequence(assetsDir, "CatWalkingLeft", WalkFrameCount, _walkLeftFrames)
                         & TryLoadSequence(assetsDir, "CatWalkingRight", WalkFrameCount, _walkRightFrames);
+                        
+            _runLoaded = TryLoadSequence(assetsDir, "CatRunningLeft", RunFrameCount, _runLeftFrames)
+                       & TryLoadSequence(assetsDir, "CatRunningRight", RunFrameCount, _runRightFrames);
 
             _sleepLoaded = TryLoadSequence(assetsDir, "CatSleepingLeft", SleepFrameCount, _sleepLeftFrames)
                          & TryLoadSequence(assetsDir, "CatSleepingRight", SleepFrameCount, _sleepRightFrames);
+
+            _tailWagLoaded = TryLoadSequence(assetsDir, "CatTailWag", TailWagFrameCount, _tailWagFrames);
         }
 
         private static bool TryLoadSequence(string assetsDir, string prefix, int count, Image?[] dest)
@@ -474,10 +500,13 @@ namespace Chubby
             int hour = DateTime.Now.Hour;
             _greetingText = hour switch
             {
-                >= 5 and < 12 => "Good morning!",
-                >= 12 and < 17 => "Good afternoon!",
-                >= 17 and < 22 => "Good evening!",
-                _ => "It's late, go to sleep!"
+                >= 5 and < 8   => "Early bird!",
+                >= 8 and < 12  => "Good morning!",
+                >= 12 and < 14 => "Lunch time!",
+                >= 14 and < 17 => "Good afternoon!",
+                >= 17 and < 20 => "Good evening!",
+                >= 20 and < 23 => "Getting sleepy...",
+                _              => "Wassup, night owl"
             };
 
             _greetingTimer.Stop();
@@ -492,6 +521,8 @@ namespace Chubby
             _moveTimer.Stop();
             _animTimer.Stop();
             _directionTimer.Stop();
+            _tailWagFrameIndex = 0;
+            _tailWagAnimTimer.Start();
 
             Invalidate();
         }
@@ -499,6 +530,7 @@ namespace Chubby
         private void StopHover()
         {
             _isHoveringLive = false;
+            _tailWagAnimTimer.Stop();
             _lingerTimer.Start();
         }
 
@@ -638,7 +670,6 @@ namespace Chubby
 
         private void MovePet()
         {
-            // check for unactivity 
             uint idleMs = GetIdleTimeMs();
             if (idleMs >= 40000)
             {
@@ -656,32 +687,33 @@ namespace Chubby
 
             if (--_stateTicks <= 0)
             {
-                _state = _state switch
+                if (_state == PetState.Walking || _state == PetState.Running)
                 {
-                    PetState.Walking => PetState.Idle,
-                    _ => PetState.Walking
-                };
-
-                _stateTicks = _state switch
+                    _state = PetState.Idle;
+                    _stateTicks = IdleTicks;
+                }
+                else
                 {
-                    PetState.Walking => WalkTicks,
-                    _ => IdleTicks
-                };
+                    _state = _random.Next(0, 10) < 3 ? PetState.Running : PetState.Walking;
+                    _stateTicks = WalkTicks;
+                }
 
                 _frameIndex = 0;
                 _idlePauseTicks = 0;
 
-                if (_state == PetState.Walking) SpawnDust(3);
+                if (_state == PetState.Walking || _state == PetState.Running) SpawnDust(3);
             }
 
-            if (_state != PetState.Walking)
+            if (_state != PetState.Walking && _state != PetState.Running)
             {
                 Invalidate();
                 return;
             }
 
             var workArea = Screen.PrimaryScreen!.WorkingArea;
-            _x += _speed * _direction;
+            
+            int currentSpeed = _state == PetState.Running ? _speed * 2 : _speed;
+            _x += currentSpeed * _direction;
 
             if (_x <= workArea.Left)
             {
@@ -771,6 +803,7 @@ namespace Chubby
             _dustTimer.Stop();
             _greetingTimer.Stop();
             _sleepAnimTimer.Stop();
+            _tailWagAnimTimer.Stop();
 
             _moveTimer.Dispose();
             _animTimer.Dispose();
@@ -783,12 +816,16 @@ namespace Chubby
             _dustTimer.Dispose();
             _greetingTimer.Dispose();
             _sleepAnimTimer.Dispose();
+            _tailWagAnimTimer.Dispose();
 
             foreach (var f in _idleFrames) f?.Dispose();
             foreach (var f in _walkLeftFrames) f?.Dispose();
             foreach (var f in _walkRightFrames) f?.Dispose();
             foreach (var f in _sleepLeftFrames) f?.Dispose();
             foreach (var f in _sleepRightFrames) f?.Dispose();
+            foreach (var f in _tailWagFrames) f?.Dispose();
+            foreach (var f in _runLeftFrames) f?.Dispose();
+            foreach (var f in _runRightFrames) f?.Dispose();
 
             base.OnFormClosed(e);
         }
@@ -799,65 +836,91 @@ namespace Chubby
             bool facingLeft = _direction < 0;
             int spriteY = WindowHeight - PetSize;
 
-            bool isFrozenWalking = (_isHoveringLive || _lingerTimer.Enabled || _isDragging) && _state == PetState.Walking;
+            g.InterpolationMode = InterpolationMode.NearestNeighbor;
+            g.PixelOffsetMode = PixelOffsetMode.Half;
 
-            Image? frame = _state switch
+            if (_isHoveringLive && _tailWagLoaded)
             {
-                PetState.Walking when isFrozenWalking && _idleLoaded => _idleFrames[0],
-                PetState.Walking when _walkLoaded => facingLeft
-                    ? _walkLeftFrames[_frameIndex % WalkFrameCount]
-                    : _walkRightFrames[_frameIndex % WalkFrameCount],
-                PetState.Sleeping when _sleepLoaded => facingLeft
-                    ? _sleepLeftFrames[_sleepFrameIndex % SleepFrameCount]
-                    : _sleepRightFrames[_sleepFrameIndex % SleepFrameCount],
-                PetState.Idle when _idleLoaded => _idleFrames[_frameIndex % IdleFrameCount],
-                _ => null
-            };
-
-            if (frame != null)
-            {
-                g.InterpolationMode = InterpolationMode.NearestNeighbor;
-                g.PixelOffsetMode = PixelOffsetMode.Half;
-
-                bool usesIdleOrientation = _state == PetState.Idle || isFrozenWalking;
-                if (usesIdleOrientation && facingLeft)
+                var tailFrame = _tailWagFrames[_tailWagFrameIndex % TailWagFrameCount];
+                if (tailFrame != null)
                 {
-                    var savedState = g.Save();
-                    g.TranslateTransform(PetSize, 0);
-                    g.ScaleTransform(-1, 1);
-                    g.DrawImage(frame, 0, spriteY, PetSize, PetSize);
-                    g.Restore(savedState);
-                }
-                else
-                {
-                    g.DrawImage(frame, 0, spriteY, PetSize, PetSize);
+                    if (facingLeft)
+                    {
+                        var savedState = g.Save();
+                        g.TranslateTransform(PetSize, 0);
+                        g.ScaleTransform(-1, 1);
+                        g.DrawImage(tailFrame, 0, spriteY, PetSize, PetSize);
+                        g.Restore(savedState);
+                    }
+                    else
+                    {
+                        g.DrawImage(tailFrame, 0, spriteY, PetSize, PetSize);
+                    }
                 }
             }
             else
             {
-                g.SmoothingMode = SmoothingMode.None;
-                int legOffset = _state == PetState.Walking && _frameIndex % 2 == 0 ? 4 : -4;
+                bool isFrozenMoving = (_lingerTimer.Enabled || _isDragging) && (_state == PetState.Walking || _state == PetState.Running);
 
-                using var bodyBrush = new SolidBrush(Color.FromArgb(255, 120, 170, 240));
-                using var eyeBrush = new SolidBrush(Color.Black);
-                using var legPen = new Pen(Color.FromArgb(255, 90, 130, 190), 5);
+                Image? frame = _state switch
+                {
+                    PetState.Walking when isFrozenMoving && _idleLoaded => _idleFrames[0],
+                    PetState.Running when isFrozenMoving && _idleLoaded => _idleFrames[0],
+                    PetState.Walking when _walkLoaded => facingLeft
+                        ? _walkLeftFrames[_frameIndex % WalkFrameCount]
+                        : _walkRightFrames[_frameIndex % WalkFrameCount],
+                    PetState.Running when _runLoaded => facingLeft
+                        ? _runLeftFrames[_frameIndex % RunFrameCount]
+                        : _runRightFrames[_frameIndex % RunFrameCount],
+                    PetState.Sleeping when _sleepLoaded => facingLeft
+                        ? _sleepLeftFrames[_sleepFrameIndex % SleepFrameCount]
+                        : _sleepRightFrames[_sleepFrameIndex % SleepFrameCount],
+                    PetState.Idle when _idleLoaded => _idleFrames[_frameIndex % IdleFrameCount],
+                    _ => null
+                };
 
-                g.FillEllipse(bodyBrush, 6, spriteY + 10, PetSize - 12, PetSize - 20);
+                if (frame != null)
+                {
+                    bool usesIdleOrientation = _state == PetState.Idle || isFrozenMoving;
+                    if (usesIdleOrientation && facingLeft)
+                    {
+                        var savedState = g.Save();
+                        g.TranslateTransform(PetSize, 0);
+                        g.ScaleTransform(-1, 1);
+                        g.DrawImage(frame, 0, spriteY, PetSize, PetSize);
+                        g.Restore(savedState);
+                    }
+                    else
+                    {
+                        g.DrawImage(frame, 0, spriteY, PetSize, PetSize);
+                    }
+                }
+                else
+                {
+                    g.SmoothingMode = SmoothingMode.None;
+                    int legOffset = (_state == PetState.Walking || _state == PetState.Running) && _frameIndex % 2 == 0 ? 4 : -4;
 
-                g.DrawLine(
-                    legPen,
-                    16, spriteY + PetSize - 14,
-                    16 + legOffset, spriteY + PetSize - 2
-                );
+                    using var bodyBrush = new SolidBrush(Color.FromArgb(255, 120, 170, 240));
+                    using var eyeBrush = new SolidBrush(Color.Black);
+                    using var legPen = new Pen(Color.FromArgb(255, 90, 130, 190), 5);
 
-                g.DrawLine(
-                    legPen,
-                    PetSize - 16, spriteY + PetSize - 14,
-                    PetSize - 16 - legOffset, spriteY + PetSize - 2
-                );
+                    g.FillEllipse(bodyBrush, 6, spriteY + 10, PetSize - 12, PetSize - 20);
 
-                int eyeX = facingLeft ? 12 : PetSize - 18;
-                g.FillEllipse(eyeBrush, eyeX, spriteY + 16, 6, 6);
+                    g.DrawLine(
+                        legPen,
+                        16, spriteY + PetSize - 14,
+                        16 + legOffset, spriteY + PetSize - 2
+                    );
+
+                    g.DrawLine(
+                        legPen,
+                        PetSize - 16, spriteY + PetSize - 14,
+                        PetSize - 16 - legOffset, spriteY + PetSize - 2
+                    );
+
+                    int eyeX = facingLeft ? 12 : PetSize - 18;
+                    g.FillEllipse(eyeBrush, eyeX, spriteY + 16, 6, 6);
+                }
             }
 
             lock (_heartLock)
@@ -873,7 +936,7 @@ namespace Chubby
 
             if (_greetingText != null)
             {
-                using var font = new Font("Segoe UI", 7.5F, FontStyle.Bold);
+                using var font = new Font("Segoe UI", 9.5F, FontStyle.Bold);
                 float bw = PetSize - 4f;
                 float bh = TopMargin - 6f;
                 float br = 8f;

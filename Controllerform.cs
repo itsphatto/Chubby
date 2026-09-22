@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
@@ -80,15 +81,29 @@ namespace Chubby
             Cursor = Cursors.Hand
         };
 
+        private readonly Label _footer = new()
+        {
+            Text = "github/itsphatto/Chubby",
+            Dock = DockStyle.Bottom,
+            Height = 24,
+            Font = new Font("Segoe UI", 8.5F, FontStyle.Regular),
+            ForeColor = TextMuted,
+            TextAlign = ContentAlignment.MiddleCenter,
+            Cursor = Cursors.Hand
+        };
+
         public ControllerForm()
         {
             Text = "Chubby";
-            ClientSize = new Size(320, 300);
+            ClientSize = new Size(320, 330);
             FormBorderStyle = FormBorderStyle.FixedSingle;
             MaximizeBox = false;
             MinimizeBox = true;
             StartPosition = FormStartPosition.CenterScreen;
             BackColor = BgColor;
+
+            // Set window title bar & taskbar icon
+            Icon = LoadTrayIcon();
 
             _spawnBtn.FlatAppearance.BorderSize = 0;
             _spawnBtn.FlatAppearance.MouseOverBackColor = AccentHover;
@@ -99,8 +114,26 @@ namespace Chubby
             _removeBtn.FlatAppearance.MouseOverBackColor = Color.FromArgb(246, 247, 249);
             _removeBtn.Click += (_, _) => RemovePet();
 
+            _footer.Click += (_, _) => OpenGitHubRepository();
+
             BuildLayout();
             BuildTrayIcon();
+        }
+
+        private static void OpenGitHubRepository()
+        {
+            try
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = "https://github.com/itsphatto/Chubby",
+                    UseShellExecute = true
+                });
+            }
+            catch
+            {
+                // Fallback if browser fails to launch
+            }
         }
 
         private void BuildTrayIcon()
@@ -204,7 +237,7 @@ namespace Chubby
             var root = new Panel
             {
                 Dock = DockStyle.Fill,
-                Padding = new Padding(28, 24, 28, 28),
+                Padding = new Padding(28, 20, 28, 16),
                 BackColor = BgColor
             };
 
@@ -219,9 +252,10 @@ namespace Chubby
             statusRow.Controls.Add(_status);
 
             var spacerSmall = new Panel { Dock = DockStyle.Top, Height = 8 };
-            var spacerMed = new Panel { Dock = DockStyle.Top, Height = 20 };
+            var spacerMed = new Panel { Dock = DockStyle.Top, Height = 16 };
             var spacerBetweenBtns = new Panel { Dock = DockStyle.Top, Height = 10 };
 
+            root.Controls.Add(_footer);
             root.Controls.Add(_removeBtn);
             root.Controls.Add(spacerBetweenBtns);
             root.Controls.Add(_spawnBtn);
